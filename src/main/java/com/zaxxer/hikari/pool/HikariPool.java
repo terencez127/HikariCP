@@ -29,8 +29,10 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import com.zaxxer.hikari.HikariDataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -88,6 +90,12 @@ public class HikariPool extends PoolBase implements HikariPoolMXBean, IBagStateL
    private final SuspendResumeLock suspendResumeLock;
 
    private MetricsTrackerDelegate metricsTracker;
+
+   // Time that the isIdle process starts
+   private long StartTime = System.currentTimeMillis();
+   // if the pool is in isIdle state
+   private boolean isIdle = false;
+   private AtomicBoolean closing = new AtomicBoolean(false);
 
    /**
     * Construct a HikariPool with the specified configuration.
@@ -589,7 +597,7 @@ public class HikariPool extends PoolBase implements HikariPoolMXBean, IBagStateL
 
          // Detect retrograde time, allowing +128ms as per NTP spec.
          if (clockSource.plusMillis(now, 128) < clockSource.plusMillis(previous, HOUSEKEEPING_PERIOD_MS)) {
-            LOGGER.warn("{} - Retrograde clock change detected (housekeeper delta={}), soft-evicting connections from pool.", 
+            LOGGER.warn("{} - Retrograde clock change detected (housekeeper delta={}), soft-evicting connections from pool.",
                         clockSource.elapsedDisplayString(previous, now), poolName);
             previous = now;
             softEvictConnections();
@@ -609,8 +617,8 @@ public class HikariPool extends PoolBase implements HikariPoolMXBean, IBagStateL
             int removable = idleList.size() - config.getMinimumIdle();
             if (removable > 0) {
                logPoolState("Before cleanup ");
-               afterPrefix = "After cleanup  "; 
-               
+               afterPrefix = "After cleanup  ";
+
                // Sort pool entries on lastAccessed
                Collections.sort(idleList, LASTACCESS_COMPARABLE);
                for (PoolEntry poolEntry : idleList) {
@@ -620,7 +628,7 @@ public class HikariPool extends PoolBase implements HikariPoolMXBean, IBagStateL
                         break; // keep min idle cons
                      };
                   }
-               }               
+               }
             }
          }
 
@@ -642,5 +650,62 @@ public class HikariPool extends PoolBase implements HikariPoolMXBean, IBagStateL
       {
          super("Failed to initialize pool: " + t.getMessage(), t);
       }
+   }
+
+   /**
+    * Shutdown the DataSource that owns the pool and its associated pool after idling for the given amount of time
+    *
+    * @param idleTime Idle time after which the pool is to be closed
+    * @param timeUnit The time unit for the given idle time
+    */
+   synchronized public void closeAfterIdlingFor(final long idleTime, final TimeUnit timeUnit) {
+      if (!closing.getAndSet(true)) {
+         houseKeepingExecutorService.scheduleWithFixedDelay(
+            new Runnable() {
+               @Override
+               public void run() {
+                  long durationInMillis = timeUnit.toMillis(idleTime);
+                  if (getActiveConnections() == 0) {
+                     if (!isIdle()) {
+                        // Start isIdle process
+                        LOGGER.info("Start idling: {}", poolName);
+                        setIdle(true);
+                        setStartTime(System.currentTimeMillis());
+                     }
+                  } else if (isIdle()) {
+                     // New connection usage, reset idle time
+                     LOGGER.info("Not idle anymore: {}", poolName);
+                     setIdle(false);
+                  }
+
+                  if (isIdle() && (System.currentTimeMillis() -
+                     getStartTime() > durationInMillis)) {
+                     LOGGER.info("Graceful shutdown: {}", poolName);
+                     new Thread(new Runnable() {
+                        @Override
+                        public void run() {
+                           ((HikariDataSource) config).close();
+                        }
+                     }).start();
+                  }
+               }
+            }, 10, 10, TimeUnit.SECONDS);
+      }
+   }
+
+   public long getStartTime() {
+      return StartTime;
+   }
+
+   public void setStartTime(final long startTime) {
+      this.StartTime = startTime;
+   }
+
+   public boolean isIdle() {
+      return isIdle;
+   }
+
+   public void setIdle(final boolean isIdle) {
+      this.isIdle = isIdle;
    }
 }

@@ -21,6 +21,7 @@ import java.io.PrintWriter;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.sql.DataSource;
@@ -335,5 +336,15 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
    public String toString()
    {
       return "HikariDataSource (" + pool + ")";
+   }
+
+   /**
+    * Shutdown the DataSource and its associated pool after idling for the given amount of time
+    *
+    * @param idleTime Idle time after which the pool is to be closed
+    * @param timeUnit The time unit for the given idle time
+     */
+   public void closeAfterIdlingFor(final long idleTime, final TimeUnit timeUnit) {
+      pool.closeAfterIdlingFor(idleTime, timeUnit);
    }
 }
